@@ -14,7 +14,8 @@ FILES = $(TSH) ./myspin ./mysplit ./mystop ./myint
 all: $(FILES)
 
 $(TSH): tsh.c csapp.c
-    $(CC) $(CFLAGS) -o $(TSH) $^
+	$(CC) $(CFLAGS) -o $(TSH) $^
+
 ##################
 # Handin your work
 ##################
