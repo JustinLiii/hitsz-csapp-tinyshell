@@ -199,7 +199,8 @@ void eval(char *cmdline)
             Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             setpgid(0,0); //shell 创建的每个进程都有自己的一个进程组
             if (execve(argv[0], argv, environ) < 0) {
-                unix_error("Exec error");
+                sprintf(sbuf, "%s: Command not found\n", argv[0]);
+                sio_puts(sbuf);
                 exit(0);
             }
         }
@@ -325,8 +326,25 @@ int builtin_cmd(char **argv)
 void do_bgfg(char **argv)
 {
     pid_t pid;
-    int jid;
+    int jid, paramcnt = 0;
     struct job_t* job;
+
+    // 检查参数
+    while(argv[paramcnt++] != NULL);
+    paramcnt--;
+
+    if (paramcnt < 2)
+    {
+        sprintf(sbuf, "%s command requires PID or %%jobid argument\n", argv[0]);
+        sio_puts(sbuf);
+        return;
+    }
+    else if (paramcnt > 2)
+    {
+        sprintf(sbuf,"%s received too many arguments, expect 1\n", argv[0]);
+        sio_puts(sbuf);
+        return;
+    }
 
     sigset_t all_mask, prev_mask;
     Sigfillset(&all_mask);
@@ -336,34 +354,55 @@ void do_bgfg(char **argv)
     if (*(argv[1]) == '%')
     {
         jid = atoi(argv[1] + 1);
+        if (jid == 0)
+        {
+            sprintf(sbuf, "%s: argument must be a PID or %%jobid\n", argv[0]);
+            sio_puts(sbuf);
+            Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            return;
+        }
+
         pid = jid2pid(jid);
         if (pid == 0)
         {
-            sprintf(sbuf, "No job with jid %%%d\n", jid);
+            sprintf(sbuf, "%%%d: No such job\n", jid);
             sio_puts(sbuf);
+            Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             return;
         }
     }
-    else pid = atoi(argv[1]);
+    else
+    {
+        pid = atoi(argv[1]);
+        if (pid == 0)
+        {
+            sprintf(sbuf, "%s: argument must be a PID or %%jobid\n", argv[0]);
+            sio_puts(sbuf);
+            Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            return;
+        }
+    }
+
     if((job = getjobpid(jobs, pid)) == NULL)
     {
-        sprintf(sbuf, "No job with pid %d\n", pid);
+        sprintf(sbuf, "(%d): No such process\n", pid);
         sio_puts(sbuf);
+        Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         return;
     }
 
-    
+    // 执行，相关信息打印由sigchild handler负责
     if (!strcmp(argv[0], "bg"))
     {
         // background
-        Kill(pid, SIGCONT);
+        Kill(-pid, SIGCONT);
         job->state = BG;
         Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
     else
     {
         // foreground
-        Kill(pid, SIGCONT);
+        Kill(-pid, SIGCONT);
         job->state = FG;
         Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         waitfg(pid);
@@ -414,15 +453,25 @@ void sigchld_handler(int sig)
     struct job_t* job;
     
     // 回收尽可能多的进程
-    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0)
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0)
     {
         if (pid == fg_pid) fg_reaped = 1; // 通知前台进程已结束/停止
         // 维护jobs
-        if (WIFSTOPPED(status)) {
-            job = getjobpid(jobs, pid);
+        job = getjobpid(jobs, pid);
+        if (WIFSIGNALED(status) && WTERMSIG(status) == SIGINT) {
+            sprintf(sbuf,"Job [%d] (%d) terminated by signal %d\n", job->jid, pid, SIGINT);
+            sio_puts(sbuf);
+            deletejob(jobs, pid);
+        } else if (WIFSTOPPED(status)) {
             job->state = ST;
-        }
-        else deletejob(jobs, pid);
+            if (WSTOPSIG(status) == SIGTSTP) {
+                sprintf(sbuf,"Job [%d] (%d) stopped by signal %d\n", job->jid, pid, SIGTSTP);
+                sio_puts(sbuf);
+            }
+        } else if (WIFCONTINUED(status) && job->state == BG) {
+            sprintf(sbuf,"[%d] (%d) %s", job->jid, pid, job->cmdline);
+            sio_puts(sbuf);
+        } else if (WIFEXITED(status)) deletejob(jobs, pid);
     }
     errno = old_errno;
 
@@ -437,16 +486,18 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig)
 {
+    // jobs列表的状态和进程信息由sigchild handler维护
     sigset_t all_mask, prev_mask;
     Sigfillset(&all_mask);
     Sigprocmask(SIG_SETMASK, &all_mask, &prev_mask);
     
     pid_t fg_pid = fgpid(jobs);
-    int fg_jid = pid2jid(fg_pid);
+    if (fg_pid == 0)
+    {
+         Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+         return;
+    }
     Kill(-fg_pid, sig);
-    sprintf(sbuf,"Job [%d] (%d) terminated by signal %d\n", fg_jid, fg_pid, sig);
-    sio_puts(sbuf);
-
     Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     return;
 }
@@ -464,11 +515,12 @@ void sigtstp_handler(int sig)
     Sigprocmask(SIG_SETMASK, &all_mask, &prev_mask);
     
     pid_t fg_pid = fgpid(jobs);
-    int fg_jid = pid2jid(fg_pid);
+    if (fg_pid == 0)
+    {
+         Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+         return;
+    }
     Kill(-fg_pid, sig);
-    sprintf(sbuf,"Job [%d] (%d) stopped by signal %d\n", fg_jid, fg_pid, sig);
-    sio_puts(sbuf);
-
     Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     return;
 }
