@@ -196,6 +196,7 @@ void eval(char *cmdline)
         {
             // child
             Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            setpgid(0,0); //shell 创建的每个进程都有自己的一个进程组
             if (execve(argv[0], argv, environ) < 0) {
                 unix_error("Exec error");
                 exit(0);
@@ -363,8 +364,9 @@ void sigchld_handler(int sig)
         deletejob(jobs, pid);
     }
     errno = old_errno;
-    
+
     Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+    return;
 }
 
 /*
@@ -374,6 +376,17 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig)
 {
+    sigset_t all_mask, prev_mask;
+    Sigfillset(&all_mask);
+    Sigprocmask(SIG_SETMASK, &all_mask, &prev_mask);
+    
+    pid_t fg_pid = fgpid(jobs);
+    int fg_jid = pid2jid(fg_pid);
+    Kill(-fg_pid, SIGINT);
+    sprintf(sbuf,"Job [%d] (%d) terminated by signal %d\n", fg_jid, fg_pid, sig);
+    sio_puts(sbuf);
+
+    Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     return;
 }
 
