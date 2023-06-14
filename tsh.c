@@ -43,6 +43,8 @@ int verbose = 0;         /* if true, print additional output */
 int nextjid = 1;         /* next job ID to allocate */
 char sbuf[MAXLINE];      /* for composing sprintf messages */
 
+volatile sig_atomic_t fg_reaped = 0; /* if fg process is reaped*/
+
 struct job_t
 {                          /* The job struct */
     pid_t pid;             /* job PID */
@@ -174,6 +176,7 @@ void eval(char *cmdline)
     char* argv[MAXARGS];
     int bg;
     pid_t child_pid;
+    int jid;
 
     // 获得参数
     bg = parseline(cmdline, argv);
@@ -182,21 +185,39 @@ void eval(char *cmdline)
     if (!builtin_cmd(argv))
     {
         // 非内置命令
+        // 创建子进程准备-阻塞SIGCHLD
+        sigset_t child_mask, all_mask, prev_mask;
+        Sigemptyset(&child_mask);
+        Sigaddset(&child_mask, SIGCHLD);
+        Sigfillset(&all_mask);
+        Sigprocmask(SIG_BLOCK, &child_mask, &prev_mask);
+
         if ((child_pid = Fork()) == 0)
         {
             // child
-            if (execve(argv[0], argv,NULL) < 0) {
+            Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            if (execve(argv[0], argv, environ) < 0) {
                 unix_error("Exec error");
                 exit(0);
             }
         }
-        // 背景-前景任务
-        if (!bg)
+        else
         {
-            int status;
-            if (waitpid(child_pid, &status, 0) < 0)
+            Sigprocmask(SIG_SETMASK, &all_mask, NULL);
+            // 主线程
+            // 维护job
+            int status = bg ? BG : FG;
+            addjob(jobs, child_pid, status, cmdline);
+            jid = pid2jid(child_pid);
+            Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+
+            // 背景-前景任务
+            if (!bg) waitfg(child_pid);
+            else
             {
-                unix_error("waitpid error");
+                // 输出bg信息
+                sprintf(sbuf ,"[%d] (%d) %s", jid, child_pid, cmdline);
+                sio_puts(sbuf);
             }
         }
     }
@@ -273,9 +294,15 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv)
 {
-    if (!strcmp(argv[0], "quit"))
-    {
-        exit(0);
+    sigset_t all_mask, prev_mask;
+    Sigfillset(&all_mask);
+
+    if (!strcmp(argv[0], "quit")) exit(0);
+    else if (!strcmp(argv[0], "jobs")) {
+        Sigprocmask(SIG_SETMASK, &all_mask, &prev_mask);
+        listjobs(jobs);
+        Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+        return 1;
     }
     return 0; /* not a builtin command */
 }
@@ -293,6 +320,18 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+    // 阻塞直到sigchld handler回收了pid的进程
+    sigset_t mask, prev_mask;
+    // 阻塞SIGCHLD
+    Sigemptyset(&mask);
+    Sigaddset(&mask, SIGCHLD);
+    Sigprocmask(SIG_BLOCK, &mask, &prev_mask);
+
+    while (!fg_reaped) Sigsuspend(&prev_mask); // 等待，直到回收了对应pid的进程
+
+    fg_reaped = 0; // 设回0，原子操作+单次赋值，无影响
+
+    Sigprocmask(SIG_SETMASK, &prev_mask, NULL); // 恢复阻塞
     return;
 }
 
@@ -309,7 +348,23 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig)
 {
-    return;
+    sigset_t all_mask, prev_mask;
+    Sigfillset(&all_mask);
+    Sigprocmask(SIG_SETMASK, &all_mask, &prev_mask);
+
+    int old_errno = errno;
+    pid_t pid, fg_pid = fgpid(jobs);
+    
+    // 回收尽可能多的进程
+    while ((pid = waitpid(-1, NULL, WNOHANG)) > 0)
+    {
+        if (pid == fg_pid) fg_reaped = 1; // 通知前台进程已结束
+        // 维护jobs
+        deletejob(jobs, pid);
+    }
+    errno = old_errno;
+    
+    Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 }
 
 /*
