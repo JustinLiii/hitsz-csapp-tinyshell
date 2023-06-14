@@ -310,7 +310,7 @@ int builtin_cmd(char **argv)
         Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         return 1;
     }
-    else if (!strcmp(argv[0], "bg") || !strcmp(argv[0], "bg"))
+    else if (!strcmp(argv[0], "bg") || !strcmp(argv[0], "fg"))
     {
         do_bgfg(argv);
         return 1;
@@ -352,14 +352,22 @@ void do_bgfg(char **argv)
         return;
     }
 
-
-    // background
+    
     if (!strcmp(argv[0], "bg"))
     {
+        // background
         Kill(pid, SIGCONT);
         job->state = BG;
+        Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
-    Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+    else
+    {
+        // foreground
+        Kill(pid, SIGCONT);
+        job->state = FG;
+        Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+        waitfg(pid);
+    }
     return;
 }
 
