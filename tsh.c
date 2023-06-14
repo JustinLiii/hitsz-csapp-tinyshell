@@ -171,6 +171,16 @@ int main(int argc, char **argv)
  */
 void eval(char *cmdline)
 {
+    char* argv[MAXARGS];
+    int bg;
+    pid_t child_pid;
+
+    // 获得参数
+    bg = parseline(cmdline, argv);
+
+    // 执行，若为内置命令，直接在builtin_cmd()中执行完成。
+    if (!builtin_cmd(argv));
+
     return;
 }
 
@@ -243,6 +253,10 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv)
 {
+    if (!strcmp(argv[0], "quit"))
+    {
+        exit(0);
+    }
     return 0; /* not a builtin command */
 }
 
