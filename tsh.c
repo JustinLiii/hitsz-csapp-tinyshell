@@ -179,7 +179,27 @@ void eval(char *cmdline)
     bg = parseline(cmdline, argv);
 
     // 执行，若为内置命令，直接在builtin_cmd()中执行完成。
-    if (!builtin_cmd(argv));
+    if (!builtin_cmd(argv))
+    {
+        // 非内置命令
+        if ((child_pid = Fork()) == 0)
+        {
+            // child
+            if (execve(argv[0], argv,NULL) < 0) {
+                unix_error("Exec error");
+                exit(0);
+            }
+        }
+        // 背景-前景任务
+        if (!bg)
+        {
+            int status;
+            if (waitpid(child_pid, &status, 0) < 0)
+            {
+                unix_error("waitpid error");
+            }
+        }
+    }
 
     return;
 }
