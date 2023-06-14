@@ -354,14 +354,20 @@ void sigchld_handler(int sig)
     Sigprocmask(SIG_SETMASK, &all_mask, &prev_mask);
 
     int old_errno = errno;
+    int status;
     pid_t pid, fg_pid = fgpid(jobs);
+    struct job_t* job;
     
     // 回收尽可能多的进程
-    while ((pid = waitpid(-1, NULL, WNOHANG)) > 0)
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0)
     {
-        if (pid == fg_pid) fg_reaped = 1; // 通知前台进程已结束
+        if (pid == fg_pid) fg_reaped = 1; // 通知前台进程已结束/停止
         // 维护jobs
-        deletejob(jobs, pid);
+        if (WIFSTOPPED(status)) {
+            job = getjobpid(jobs, pid);
+            job->state = ST;
+        }
+        else deletejob(jobs, pid);
     }
     errno = old_errno;
 
@@ -382,7 +388,7 @@ void sigint_handler(int sig)
     
     pid_t fg_pid = fgpid(jobs);
     int fg_jid = pid2jid(fg_pid);
-    Kill(-fg_pid, SIGINT);
+    Kill(-fg_pid, sig);
     sprintf(sbuf,"Job [%d] (%d) terminated by signal %d\n", fg_jid, fg_pid, sig);
     sio_puts(sbuf);
 
@@ -397,6 +403,18 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig)
 {
+    // jobs列表的状态由sigchild handler维护
+    sigset_t all_mask, prev_mask;
+    Sigfillset(&all_mask);
+    Sigprocmask(SIG_SETMASK, &all_mask, &prev_mask);
+    
+    pid_t fg_pid = fgpid(jobs);
+    int fg_jid = pid2jid(fg_pid);
+    Kill(-fg_pid, sig);
+    sprintf(sbuf,"Job [%d] (%d) stopped by signal %d\n", fg_jid, fg_pid, sig);
+    sio_puts(sbuf);
+
+    Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     return;
 }
 
