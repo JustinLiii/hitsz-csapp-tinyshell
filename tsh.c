@@ -80,6 +80,7 @@ pid_t fgpid(struct job_t *jobs);
 struct job_t *getjobpid(struct job_t *jobs, pid_t pid);
 struct job_t *getjobjid(struct job_t *jobs, int jid);
 int pid2jid(pid_t pid);
+int jid2pid(int jid);
 void listjobs(struct job_t *jobs);
 
 void usage(void);
@@ -208,7 +209,11 @@ void eval(char *cmdline)
             // 主线程
             // 维护job
             int status = bg ? BG : FG;
-            addjob(jobs, child_pid, status, cmdline);
+            if (addjob(jobs, child_pid, status, cmdline) == 0)
+            {
+                Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+                return;
+            }
             jid = pid2jid(child_pid);
             Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
@@ -298,13 +303,19 @@ int builtin_cmd(char **argv)
     sigset_t all_mask, prev_mask;
     Sigfillset(&all_mask);
 
-    if (!strcmp(argv[0], "quit")) exit(0);
-    else if (!strcmp(argv[0], "jobs")) {
+    if (!strcmp(argv[0], "jobs"))
+    {
         Sigprocmask(SIG_SETMASK, &all_mask, &prev_mask);
         listjobs(jobs);
         Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         return 1;
     }
+    else if (!strcmp(argv[0], "bg") || !strcmp(argv[0], "bg"))
+    {
+        do_bgfg(argv);
+        return 1;
+    }
+    else if (!strcmp(argv[0], "quit")) exit(0);
     return 0; /* not a builtin command */
 }
 
@@ -313,6 +324,42 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv)
 {
+    pid_t pid;
+    int jid;
+    struct job_t* job;
+
+    sigset_t all_mask, prev_mask;
+    Sigfillset(&all_mask);
+    Sigprocmask(SIG_SETMASK, &all_mask, &prev_mask);
+
+    // 解析进程号
+    if (*(argv[1]) == '%')
+    {
+        jid = atoi(argv[1] + 1);
+        pid = jid2pid(jid);
+        if (pid == 0)
+        {
+            sprintf(sbuf, "No job with jid %%%d\n", jid);
+            sio_puts(sbuf);
+            return;
+        }
+    }
+    else pid = atoi(argv[1]);
+    if((job = getjobpid(jobs, pid)) == NULL)
+    {
+        sprintf(sbuf, "No job with pid %d\n", pid);
+        sio_puts(sbuf);
+        return;
+    }
+
+
+    // background
+    if (!strcmp(argv[0], "bg"))
+    {
+        Kill(pid, SIGCONT);
+        job->state = BG;
+    }
+    Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     return;
 }
 
@@ -552,6 +599,21 @@ int pid2jid(pid_t pid)
         if (jobs[i].pid == pid)
         {
             return jobs[i].jid;
+        }
+    return 0;
+}
+
+/* custom - jid to pid*/
+int jid2pid(int jid)
+{
+    int i;
+
+    if (jid < 1)
+        return 0;
+    for (i = 0; i < MAXJOBS; i++)
+        if (jobs[i].jid == jid)
+        {
+            return jobs[i].pid;
         }
     return 0;
 }
